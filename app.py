@@ -222,13 +222,20 @@ def index():
 
 @app.route("/api/data")
 def get_data():
-    return jsonify(latest_data)
+    try:
+        snapshot = build_snapshot()
+        return jsonify(snapshot)
+    except Exception as exc:
+        latest_data["connection"] = "ERROR"
+        latest_data["connection_error"] = str(exc)
+        latest_data["last_updated"] = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        return jsonify(latest_data), 200
 
 
 @app.route("/health")
 def health():
     return jsonify({
-        "ok": latest_data["connection"] == "CONNECTED",
+        "ok": latest_data["connection"] in ("CONNECTED", "CONNECTED_WITH_WARNINGS"),
         "connection": latest_data["connection"],
         "symbol": latest_data["symbol"],
         "timeframes_ready": [
