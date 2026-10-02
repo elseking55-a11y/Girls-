@@ -11,7 +11,7 @@ import numpy as np
 app = Flask(__name__)
 
 APP_ID = "1089"
-WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
+WS_URL = f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}"
 DEFAULT_SYMBOL = "frxXAUUSD"
 TIMEFRAMES = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600}
 
@@ -61,98 +61,63 @@ def analyze_timeframe(candles):
             "ema_slow":round(slow,2),"atr":round(atr,2),"ready":True}
 
 
-def get_active_gold_symbol():
-    ws = websocket.create_connection(WS_URL, timeout=8)
+def fetch_market_snapshot():
+    ws = websocket.create_connection(WS_URL, timeout=10)
     try:
-        ws.send(json.dumps({"active_symbols":"brief","req_id":100}))
-        while True:
+        ws.send(json.dumps({"active_symbols":"brief","product_type":"basic","req_id":100}))
+        symbol = None
+        candles = {}
+        deadline = time.time() + 10
+        while time.time() < deadline and (symbol is None or len(candles) < len(TIMEFRAMES)):
             data = json.loads(ws.recv())
             if data.get("error"):
-                raise RuntimeError(f'{data["error"].get("code","API_ERROR")}: {data["error"].get("message","Deriv error")}')
-            if data.get("req_id") == 100 and data.get("msg_type") == "active_symbols":
-                candidates = []
-                for item in data.get("active_symbols", []):
-                    symbol = item.get("underlying_symbol") or item.get("symbol")
-                    name = (item.get("underlying_symbol_name") or item.get("display_name") or "").lower()
-                    if symbol and ("xau" in symbol.lower() or "gold" in name):
-                        candidates.append(symbol)
-                return DEFAULT_SYMBOL if DEFAULT_SYMBOL in candidates else (candidates[0] if candidates else None)
-    finally:
-        ws.close()
-
-
-def fetch_timeframe(symbol, tf, granularity):
-    ws = websocket.create_connection(WS_URL, timeout=8)
-    try:
-        ws.send(json.dumps({"ticks_history":symbol,"adjust_start_time":1,"count":100,"end":"latest",
-                            "style":"candles","granularity":granularity,"req_id":1}))
-        deadline = time.time() + 8
-        while time.time() < deadline:
-            data = json.loads(ws.recv())
-            if data.get("error"):
-                raise RuntimeError(f'{data["error"].get("code","API_ERROR")}: {data["error"].get("message","Deriv error")}')
-            if data.get("req_id") == 1 and data.get("msg_type") == "candles":
-                candles = []
-                for c in data.get("candles", []):
-                    try:
-                        candles.append({"epoch":int(c["epoch"]),"open":float(c["open"]),"high":float(c["high"]),
-                                        "low":float(c["low"]),"close":float(c["close"])})
-                    except (KeyError,TypeError,ValueError):
-                        pass
-                return candles
-        raise RuntimeError(f"{tf}: Deriv candle request timed out")
+                err=data["error"]
+                raise RuntimeError(f'{err.get("code","API_ERROR")}: {err.get("message","Deriv error")}')
+            if data.get("msg_type") == "active_symbols" and data.get("req_id") == 100:
+                candidates=[]
+                for item in data.get("active_symbols",[]):
+                    sym=item.get("underlying_symbol") or item.get("symbol")
+                    name=(item.get("underlying_symbol_name") or item.get("display_name") or "").lower()
+                    if sym and ("xau" in sym.lower() or "gold" in name): candidates.append(sym)
+                symbol=DEFAULT_SYMBOL if DEFAULT_SYMBOL in candidates else (candidates[0] if candidates else None)
+                if not symbol: raise RuntimeError("Deriv has no active XAU/Gold symbol available right now.")
+                for req_id,(tf,gran) in enumerate(TIMEFRAMES.items(),1):
+                    ws.send(json.dumps({"ticks_history":symbol,"adjust_start_time":1,"count":100,"end":"latest","style":"candles","granularity":gran,"req_id":req_id}))
+            req_id=data.get("req_id")
+            if data.get("msg_type")=="candles" and isinstance(req_id,int) and 1<=req_id<=5:
+                tf=list(TIMEFRAMES)[req_id-1]
+                parsed=[]
+                for x in data.get("candles",[]):
+                    try: parsed.append({"epoch":int(x["epoch"]),"open":float(x["open"]),"high":float(x["high"]),"low":float(x["low"]),"close":float(x["close"])})
+                    except (KeyError,TypeError,ValueError): pass
+                candles[tf]=parsed
+        if symbol is None: raise RuntimeError("Deriv did not return an active Gold/XAU symbol.")
+        missing=[tf for tf in TIMEFRAMES if tf not in candles]
+        if missing: raise RuntimeError("Deriv data timeout for: "+", ".join(missing))
+        return symbol,candles
     finally:
         ws.close()
 
 
 def build_snapshot():
-    symbol = get_active_gold_symbol()
-    if not symbol:
-        raise RuntimeError("Deriv has no active XAU/Gold symbol available right now.")
-    results = {}
-    errors = []
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        jobs = {pool.submit(fetch_timeframe, symbol, tf, gran): tf for tf, gran in TIMEFRAMES.items()}
-        for job in as_completed(jobs):
-            tf = jobs[job]
-            try:
-                results[tf] = analyze_timeframe(job.result())
-            except Exception as exc:
-                results[tf] = {"direction":"WAIT","score":0,"rsi":50.0,"ema_fast":0.0,"ema_slow":0.0,"atr":0.0,"ready":False}
-                errors.append(f"{tf}: {exc}")
-    ready = [tf for tf in TIMEFRAMES if results.get(tf, {}).get("ready")]
-    if not ready:
-        raise RuntimeError("; ".join(errors) or "No Deriv timeframe data received.")
-    weights = {"M1":1,"M5":1,"M15":2,"M30":2,"H1":3}
-    score = sum(results[tf]["score"] * weights[tf] for tf in ready)
-    max_score = sum(weights[tf] * 3 for tf in ready)
-    buy_weight = sum(weights[tf] for tf in ready if results[tf]["direction"] == "BUY")
-    sell_weight = sum(weights[tf] for tf in ready if results[tf]["direction"] == "SELL")
-    signal = "BUY" if score >= 9 and buy_weight >= 5 else "SELL" if score <= -9 and sell_weight >= 5 else "WAIT"
-    confidence = int(min(100, abs(score) / max_score * 100)) if max_score else 0
-    price_candidates = [results[tf].get("_price") for tf in ready]
-    # Get the current price from the fastest fresh candle in a separate lightweight request.
-    candles = fetch_timeframe(symbol, "M1", 60)
-    price = candles[-1]["close"] if candles else 0.0
-    atrs = [results[tf]["atr"] for tf in ready if results[tf]["atr"] > 0]
-    atr = float(np.median(atrs)) if atrs else max(price * 0.001, 0.01)
-    if signal == "BUY":
-        sl,tp1,tp2,tp3 = price-1.5*atr,price+atr,price+2*atr,price+3.5*atr
-        reason = f"Multi-timeframe BUY confirmation. Weighted score {score}; buy weight {buy_weight}."
-    elif signal == "SELL":
-        sl,tp1,tp2,tp3 = price+1.5*atr,price-atr,price-2*atr,price-3.5*atr
-        reason = f"Multi-timeframe SELL confirmation. Weighted score {score}; sell weight {sell_weight}."
-    else:
-        sl=tp1=tp2=tp3=0.0
-        reason = "WAIT: M1/M5/M15/M30/H1 are not sufficiently aligned for a final signal."
-    latest_data.update({
-        "price":price,"last_updated":datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
-        "connection":"CONNECTED" if not errors else "CONNECTED_WITH_WARNINGS","connection_error":"; ".join(errors),
-        "symbol":symbol,"timeframes":results,
-        "signal":{"type":signal,"score":score,"confidence":confidence,"reason":reason,
-                  "entry":round(price,2),"sl":round(sl,2),"tp1":round(tp1,2),"tp2":round(tp2,2),
-                  "tp3":round(tp3,2),"time":datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}
-    })
+    symbol,candle_sets=fetch_market_snapshot()
+    results={tf:analyze_timeframe(candle_sets[tf]) for tf in TIMEFRAMES}
+    ready=[tf for tf in TIMEFRAMES if results[tf]["ready"]]
+    weights={"M1":1,"M5":1,"M15":2,"M30":2,"H1":3}
+    score=sum(results[tf]["score"]*weights[tf] for tf in ready)
+    max_score=sum(weights[tf]*3 for tf in ready)
+    buy_weight=sum(weights[tf] for tf in ready if results[tf]["direction"]=="BUY")
+    sell_weight=sum(weights[tf] for tf in ready if results[tf]["direction"]=="SELL")
+    signal="BUY" if score>=9 and buy_weight>=5 else "SELL" if score<=-9 and sell_weight>=5 else "WAIT"
+    confidence=int(min(100,abs(score)/max_score*100)) if max_score else 0
+    price=candle_sets["M1"][-1]["close"] if candle_sets["M1"] else 0.0
+    atrs=[results[tf]["atr"] for tf in ready if results[tf]["atr"]>0]
+    atr=float(np.median(atrs)) if atrs else max(price*0.001,0.01)
+    if signal=="BUY": sl,tp1,tp2,tp3=price-1.5*atr,price+atr,price+2*atr,price+3.5*atr
+    elif signal=="SELL": sl,tp1,tp2,tp3=price+1.5*atr,price-atr,price-2*atr,price-3.5*atr
+    else: sl=tp1=tp2=tp3=0.0
+    reason=(f"Multi-timeframe {signal} confirmation. Weighted score {score}." if signal!="WAIT" else "WAIT: M1/M5/M15/M30/H1 are not sufficiently aligned for a final signal.")
+    latest_data.update({"price":price,"last_updated":datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),"connection":"CONNECTED","connection_error":"","symbol":symbol,"timeframes":results,"signal":{"type":signal,"score":score,"confidence":confidence,"reason":reason,"entry":round(price,2),"sl":round(sl,2),"tp1":round(tp1,2),"tp2":round(tp2,2),"tp3":round(tp3,2),"time":datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}})
     return latest_data
 
 HTML_TEMPLATE = """
