@@ -154,7 +154,7 @@ HTML_TEMPLATE = """
 </div>
 <script>
 const money=v=>Number(v||0).toFixed(2),TF={M1:60,M5:300,M15:900,M30:1800,H1:3600};
-const ENDPOINTS=['wss://ws.binaryws.com/websockets/v3?app_id=1089','wss://ws.derivws.com/websockets/v3?app_id=1089'];
+const ENDPOINTS=['wss://api.derivws.com/trading/v1/options/ws/public','wss://ws.binaryws.com/websockets/v3?app_id=1089'];
 let ws=null,retry=null,watchdog=null,endpointIndex=0,req={},candles={};
 
 function status(x){document.getElementById('connection').textContent=x}
