@@ -1,7 +1,7 @@
 import json
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask, jsonify, render_template_string
 import websocket
 import pandas as pd
@@ -13,12 +13,16 @@ app = Flask(__name__)
 SYMBOL = "frxXAUUSD"
 APP_ID = "1089"
 GRANULARITY = 900  # 15-Minute Candles
+WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
 
 # Shared State Storage
 candle_history = []
 latest_data = {
     "price": 0.0,
     "last_updated": "Initializing...",
+    "connection": "CONNECTING",
+    "connection_error": "",
+    "symbol": SYMBOL,
     "signal": {
         "type": "WAIT",
         "reason": "Connecting to Deriv real-time feed...",
@@ -110,12 +114,27 @@ def analyze_candles(df):
 
 def on_message(ws, message):
     global candle_history, latest_data
-    data = json.loads(message)
-    
+    try:
+        data = json.loads(message)
+    except (TypeError, json.JSONDecodeError) as exc:
+        latest_data["connection_error"] = f"Invalid Deriv response: {exc}"
+        return
+
+    if data.get("error"):
+        err = data["error"]
+        code = err.get("code", "API_ERROR")
+        message_text = err.get("message", "Unknown Deriv API error")
+        latest_data["connection"] = "ERROR"
+        latest_data["connection_error"] = f"{code}: {message_text}"
+        print(f"Deriv API error: {code}: {message_text}", flush=True)
+        return
+
     if data.get("msg_type") == "candles":
         candle_history = data.get("candles", [])
         if candle_history:
             latest_data["price"] = float(candle_history[-1]["close"])
+            latest_data["connection"] = "CONNECTED"
+            latest_data["connection_error"] = ""
             latest_data["last_updated"] = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
             df = pd.DataFrame(candle_history)
             df = calculate_indicators(df)
@@ -123,6 +142,8 @@ def on_message(ws, message):
 
     elif data.get("msg_type") == "ohlc":
         ohlc = data.get("ohlc", {})
+        if not ohlc:
+            return
         new_candle = {
             "epoch": ohlc.get("open_time"),
             "open": float(ohlc.get("open")),
@@ -145,10 +166,12 @@ def on_message(ws, message):
 def start_websocket():
     def run():
         while True:
+            ws = None
             try:
-                ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
+                latest_data["connection"] = "CONNECTING"
+                latest_data["connection_error"] = ""
                 ws = websocket.WebSocketApp(
-                    ws_url,
+                    WS_URL,
                     on_open=lambda ws: ws.send(json.dumps({
                         "ticks_history": SYMBOL,
                         "adjust_start_time": 1,
@@ -157,17 +180,34 @@ def start_websocket():
                         "start": 1,
                         "style": "candles",
                         "granularity": GRANULARITY,
-                        "subscribe": 1
+                        "subscribe": 1,
+                        "req_id": 1
                     })),
                     on_message=on_message,
-                    on_error=lambda ws, err: print(f"WS Error: {err}")
+                    on_error=lambda ws, err: (
+                        latest_data.update({"connection": "ERROR", "connection_error": str(err)}),
+                        print(f"Deriv WS error: {err}", flush=True)
+                    ),
+                    on_close=lambda ws, code, msg: (
+                        latest_data.update({"connection": "RECONNECTING"}),
+                        print(f"Deriv WS closed: {code} {msg}", flush=True)
+                    )
                 )
-                ws.run_forever()
-            except Exception as e:
-                print(f"Reconnecting WS... Error: {e}")
-            time.sleep(5)
+                ws.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception as exc:
+                latest_data["connection"] = "ERROR"
+                latest_data["connection_error"] = str(exc)
+                print(f"Deriv reconnect error: {exc}", flush=True)
+            finally:
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+            latest_data["connection"] = "RECONNECTING"
+            time.sleep(2)
 
-    thread = threading.Thread(target=run, daemon=True)
+    thread = threading.Thread(target=run, daemon=True, name="deriv-market-data")
     thread.start()
 
 start_websocket()
@@ -300,6 +340,16 @@ def index():
 @app.route("/api/data")
 def get_data():
     return jsonify(latest_data)
+
+@app.route("/health")
+def health():
+    return jsonify({
+        "ok": latest_data["connection"] == "CONNECTED",
+        "connection": latest_data["connection"],
+        "symbol": latest_data["symbol"],
+        "last_updated": latest_data["last_updated"],
+        "error": latest_data["connection_error"]
+    })
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
