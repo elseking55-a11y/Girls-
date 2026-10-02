@@ -22,6 +22,9 @@ TIMEFRAMES = {
     "H1": 3600,
 }
 REQ_TO_TF = {index + 1: tf for index, tf in enumerate(TIMEFRAMES)}
+ACTIVE_SYMBOL_REQ_ID = 100
+
+deriv_symbol = None
 
 candle_history = {tf: [] for tf in TIMEFRAMES}
 latest_data = {
@@ -282,6 +285,28 @@ def on_message(ws, message):
     msg_type = data.get("msg_type")
     req_id = data.get("req_id")
 
+    if msg_type == "active_symbols":
+        symbols = data.get("active_symbols") or []
+        candidates = []
+        for item in symbols:
+            symbol = item.get("underlying_symbol") or item.get("symbol")
+            name = (item.get("underlying_symbol_name") or item.get("display_name") or "").lower()
+            if symbol and ("xau" in symbol.lower() or "gold" in name):
+                candidates.append(symbol)
+
+        chosen = next((s for s in candidates if s == SYMBOL), None)
+        if chosen is None and candidates:
+            chosen = candidates[0]
+
+        if not chosen:
+            latest_data["connection"] = "ERROR"
+            latest_data["connection_error"] = "Deriv has no active XAU/Gold symbol available right now."
+            print("No active XAU/Gold symbol returned by Deriv.", flush=True)
+            return
+
+        subscribe_all(ws, chosen)
+        return
+
     if msg_type == "candles" and req_id in REQ_TO_TF:
         tf = REQ_TO_TF[req_id]
         process_candles(tf, data.get("candles", []))
@@ -299,10 +324,14 @@ def on_message(ws, message):
             process_ohlc(tf, data.get("ohlc", {}))
 
 
-def subscribe_all(ws):
+def subscribe_all(ws, symbol):
+    global deriv_symbol
+    deriv_symbol = symbol
+    latest_data["symbol"] = symbol
+
     for req_id, (tf, granularity) in enumerate(TIMEFRAMES.items(), start=1):
         request = {
-            "ticks_history": SYMBOL,
+            "ticks_history": symbol,
             "adjust_start_time": 1,
             "count": 100,
             "end": "latest",
@@ -312,7 +341,7 @@ def subscribe_all(ws):
             "req_id": req_id,
         }
         ws.send(json.dumps(request))
-        time.sleep(0.15)
+        time.sleep(0.1)
 
 
 def start_websocket():
@@ -325,7 +354,10 @@ def start_websocket():
 
                 ws = websocket.WebSocketApp(
                     WS_URL,
-                    on_open=lambda socket: subscribe_all(socket),
+                    on_open=lambda socket: socket.send(json.dumps({
+                        "active_symbols": "brief",
+                        "req_id": ACTIVE_SYMBOL_REQ_ID,
+                    })),
                     on_message=on_message,
                     on_error=lambda socket, err: (
                         latest_data.update({
