@@ -67,7 +67,7 @@ def analyze_candles(df):
     rsi = float(curr['rsi']) if not np.isnan(curr['rsi']) else 50.0
     ema_fast = float(curr['ema_fast'])
     ema_slow = float(curr['ema_slow'])
-    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     # 1. BUY CONDITION: EMA 9 above EMA 21 + Bullish RSI (> 52)
     if ema_fast > ema_slow and rsi >= 52:
@@ -116,7 +116,7 @@ def on_message(ws, message):
         candle_history = data.get("candles", [])
         if candle_history:
             latest_data["price"] = float(candle_history[-1]["close"])
-            latest_data["last_updated"] = datetime.utcnow().strftime("%H:%M:%S UTC")
+            latest_data["last_updated"] = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
             df = pd.DataFrame(candle_history)
             df = calculate_indicators(df)
             analyze_candles(df)
@@ -131,7 +131,7 @@ def on_message(ws, message):
             "close": float(ohlc.get("close")),
         }
         latest_data["price"] = new_candle["close"]
-        latest_data["last_updated"] = datetime.utcnow().strftime("%H:%M:%S UTC")
+        latest_data["last_updated"] = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
         if candle_history and candle_history[-1]["epoch"] == new_candle["epoch"]:
             candle_history[-1] = new_candle
@@ -260,7 +260,7 @@ HTML_TEMPLATE = """
                 const data = await response.json();
                 
                 document.getElementById('live-price').innerText = '$' + data.price.toFixed(2);
-                document.getElementById('last-sync').innerText = data.last_updated;
+                document.getElementById('last-sync').innerText = data.last_updated + ' • ' + data.connection;
                 
                 const sig = data.signal;
                 const badge = document.getElementById('signal-badge');
