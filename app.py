@@ -185,10 +185,10 @@ function render(){
 function connect(){
  clearTimeout(retry);try{if(ws)ws.close()}catch(e){} candles={};req={};status('CONNECTING TO DERIV LIVE DATA');
  ws=new WebSocket('wss://ws.binaryws.com/websockets/v3?app_id=1089');
- ws.onopen=()=>{status('CONNECTED · REQUESTING MARKET DATA');ws.send(JSON.stringify({active_symbols:'brief',product_type:'basic',req_id:100}))};
+ ws.onopen=()=>{status('CONNECTED · REQUESTING MARKET DATA');ws.send(JSON.stringify({active_symbols:'brief',req_id:100}))};
  ws.onmessage=e=>{let d=JSON.parse(e.data);if(d.error){status('DERIV ERROR · '+d.error.message);return}
-  if(d.msg_type==='active_symbols'&&d.req_id===100){let a=d.active_symbols||[],g=a.find(x=>x.symbol==='frxXAUUSD')||a.find(x=>/xau|gold/i.test((x.symbol||'')+' '+(x.display_name||'')));if(!g){status('DERIV ERROR · XAU/USD unavailable');return}
-   Object.entries(TF).forEach(([tf,gran],i)=>{req[i+1]=tf;ws.send(JSON.stringify({ticks_history:g.symbol,adjust_start_time:1,count:100,end:'latest',style:'candles',granularity:gran,req_id:i+1}))});status('CONNECTED · LOADING M1 M5 M15 M30 H1')}
+  if(d.msg_type==='active_symbols'&&d.req_id===100){let a=d.active_symbols||[],g=a.find(x=>(x.underlying_symbol||x.symbol)==='frxXAUUSD')||a.find(x=>/xau|gold/i.test((x.underlying_symbol||x.symbol||'')+' '+(x.underlying_symbol_name||x.display_name||'')));if(!g){status('DERIV ERROR · XAU/USD unavailable');return}
+   Object.entries(TF).forEach(([tf,gran],i)=>{req[i+1]=tf;ws.send(JSON.stringify({ticks_history:g.underlying_symbol||g.symbol,adjust_start_time:1,count:100,end:'latest',style:'candles',granularity:gran,subscribe:1,req_id:i+1}))});status('CONNECTED · LOADING M1 M5 M15 M30 H1')}
   if(d.msg_type==='candles'&&req[d.req_id]){candles[req[d.req_id]]=(d.candles||[]).map(x=>({epoch:+x.epoch,open:+x.open,high:+x.high,low:+x.low,close:+x.close}));render();if(Object.keys(candles).length===5)status('CONNECTED · LIVE DERIV DATA · XAU/USD')}
  };
  ws.onerror=()=>status('DERIV DISCONNECTED · RECONNECTING');ws.onclose=()=>{status('DERIV DISCONNECTED · RECONNECTING');retry=setTimeout(connect,1500)};
