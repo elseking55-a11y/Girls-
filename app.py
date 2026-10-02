@@ -195,7 +195,7 @@ function connect(){
  watchdog=setTimeout(()=>{endpointIndex++;reconnect('DERIV CONNECTION TIMEOUT')},7000);
  ws.onopen=()=>{
   clearTimeout(watchdog);status('CONNECTED · FINDING XAU/USD');
-  ws.send(JSON.stringify({active_symbols:'brief',product_type:'basic',req_id:100}));
+  ws.send(JSON.stringify({active_symbols:'brief',req_id:100}));
  };
  ws.onmessage=e=>{
   let d;try{d=JSON.parse(e.data)}catch(_){return}
